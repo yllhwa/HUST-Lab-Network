@@ -1,4 +1,3 @@
-#define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include "library.h"
 
 #include <stdio.h>
@@ -12,6 +11,7 @@
 SOCKADDR_IN remote_addr;
 
 void set_remote_ip(char *ip){
+    Log(LOG_INFO, "set_remote_ip: %s", ip);
     remote_addr.sin_family = AF_INET;
     remote_addr.sin_port = htons(69);
     remote_addr.sin_addr.S_un.S_addr = inet_addr(ip);
@@ -28,21 +28,24 @@ double get_time() {
     return (double) time.QuadPart / freq.QuadPart;
 }
 
-int get_file(char *filename, char *local_name, int mode) {
-    Log(LOG_INFO, "get_file: filename=%s, local_name=%s, mode=%s", filename, local_name, mode == MODE_NETASCII ? "netascii" : "octet");
-    // 拷贝remote_addr
-    SOCKADDR_IN _remote_addr = remote_addr;
-    // 构造请求包
+void send_ssq_packet(const char *filename, int mode, SOCKADDR_IN *_remote_addr, SOCKET *sock) {
     char *packet;
     char *mode_str = mode == MODE_NETASCII ? "netascii" : "octet";
     int packet_len = 2 + strlen(filename) + 1 + strlen(mode_str) + 1;
     packet = malloc(packet_len);
     sprintf_s(packet, packet_len, "%c%c%s%c%s", 0, OP_RRQ, filename, 0, mode_str);
     // 发送get请求
-    SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
-    sendto(sock, packet, packet_len, 0, (SOCKADDR *) &_remote_addr, sizeof(_remote_addr));
+    sendto((*sock), packet, packet_len, 0, (SOCKADDR *) _remote_addr, sizeof((*_remote_addr)));
     Log(LOG_INFO, "get_file: send RRQ packet");
     free(packet);
+}
+
+int get_file(char *filename, char *local_name, int mode) {
+    Log(LOG_INFO, "get_file: filename=%s, local_name=%s, mode=%s", filename, local_name, mode == MODE_NETASCII ? "netascii" : "octet");
+    // 拷贝remote_addr
+    SOCKADDR_IN _remote_addr = remote_addr;
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0); // 构造请求包
+    send_ssq_packet(filename, mode, &_remote_addr, &sock);
     // 等待数据3s超时, select控制超时
     unsigned char buf[516];
     fd_set readfds;
@@ -131,7 +134,7 @@ int get_file(char *filename, char *local_name, int mode) {
 }
 
 int wait_ack(SOCKET sock, int block_num, SOCKADDR_IN* _remote_addr) {
-    char buf[516];
+    unsigned char buf[516];
     fd_set readfds;
     FD_ZERO(&readfds);
     FD_SET(sock, &readfds);
@@ -158,8 +161,8 @@ int wait_ack(SOCKET sock, int block_num, SOCKADDR_IN* _remote_addr) {
         }
         if (buf[1] == OP_ACK) {
             int recv_block_num = (buf[2] << 8) + buf[3];
+            Log(LOG_INFO, "wait_ack: recv ACK, block_num: %d", recv_block_num);
             if (recv_block_num == block_num) {
-                Log(LOG_INFO, "wait_ack: recv ACK, block_num: %d", block_num);
                 return 0;
             }
         }
@@ -167,20 +170,24 @@ int wait_ack(SOCKET sock, int block_num, SOCKADDR_IN* _remote_addr) {
     return -4;
 }
 
-int put_file(char *filename, char *local_name, int mode) {
-    Log(LOG_INFO, "put_file: filename: %s, local_name: %s, mode: %d", filename, local_name, mode);
-    // 拷贝remote_addr
-    SOCKADDR_IN _remote_addr = remote_addr;
-    // 构造请求包
+void send_wrq_packet(const char *filename, int mode, SOCKADDR_IN *_remote_addr, SOCKET *sock) {
     char *packet;
     char *mode_str = mode == MODE_NETASCII ? "netascii" : "octet";
     int packet_len = 2 + strlen(filename) + 1 + strlen(mode_str) + 1;
     packet = malloc(packet_len);
     sprintf_s(packet, packet_len, "%c%c%s%c%s", 0, OP_WRQ, filename, 0, mode_str);
-    SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
-    sendto(sock, packet, packet_len, 0, (SOCKADDR *) &_remote_addr, sizeof(_remote_addr));
+    sendto((*sock), packet, packet_len, 0, (SOCKADDR *) _remote_addr, sizeof((*_remote_addr)));
     Log(LOG_INFO, "put_file: send WRQ, filename: %s", filename);
     free(packet);
+}
+
+int put_file(char *filename, char *local_name, int mode) {
+    Log(LOG_INFO, "put_file: filename: %s, local_name: %s, mode: %d", filename, local_name, mode);
+    // 拷贝remote_addr
+    SOCKADDR_IN _remote_addr = remote_addr;
+    // 构造请求包
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
+    send_wrq_packet(filename, mode, &_remote_addr, &sock);
     // 等待ack
     int ret = wait_ack(sock, 0, &_remote_addr);
     if (ret != 0) {
@@ -189,11 +196,19 @@ int put_file(char *filename, char *local_name, int mode) {
     }
     // 打开文件
     FILE *fp = fopen(local_name, mode==MODE_NETASCII?"r":"rb");
+    // 若文件不存在
+    if (fp == NULL) {
+        Log(LOG_ERROR, "put_file: file not exist");
+        return -1;
+    }
     int block_num = 1;
     int ret_flag = 0;
+    // 记录开始时间
+    double start_time = get_time();
+    int total_bytes = 0;
     while (1) {
         // 读取文件
-        char buf[512];
+        unsigned char buf[512];
         int len = fread(buf, 1, 512, fp);
         if (len == 0) {
             Log(LOG_INFO, "put_file: finished");
@@ -206,7 +221,7 @@ int put_file(char *filename, char *local_name, int mode) {
         packet = malloc(packet_len);
         packet[0] = 0;
         packet[1] = OP_DATA;
-        packet[2] = block_num >> 8;
+        packet[2] = (block_num >> 8) & 0xff;
         packet[3] = block_num & 0xff;
         memcpy(packet + 4, buf, len);
         // 发送数据包
@@ -221,6 +236,16 @@ int put_file(char *filename, char *local_name, int mode) {
             fseek(fp, -len, SEEK_CUR);
             continue;
         } else {
+            // 记录速度
+            total_bytes += packet_len - 4;
+            double now_time = get_time();
+            double time_diff = now_time - start_time;
+            // 考虑end_time-start_time=0的情况
+            if (time_diff > 0) {
+                Log(LOG_INFO, "get_file: speed: %.2f KB/s", total_bytes / time_diff / 1024);
+                start_time = now_time;
+                total_bytes = 0;
+            }
             block_num++;
         }
     }

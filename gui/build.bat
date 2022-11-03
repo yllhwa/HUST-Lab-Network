@@ -1,0 +1,1 @@
+wails build -upx -webview2 Error -upxflags "--lzma"

@@ -38,7 +38,7 @@ void _Log(enum LOG_LEVEL level, char *msg) {
             level == LOG_SPEED ? "SPEED" : "UNKNOWN",
             time_str,
             msg);
-//    fflush(log_file);
+    fflush(log_file);
 }
 
 void Log(enum LOG_LEVEL level, const char* format, ...)
