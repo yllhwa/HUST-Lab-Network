@@ -1,0 +1,28 @@
+interface Vlanif100
+ ip address 10.12.172.2 30
+#
+interface Vlanif2111
+ ip address 10.12.160.1 23
+#
+interface Vlanif2112
+ ip address 10.12.162.1 23
+#
+
+#
+interface GigabitEthernet0/0/1
+ port link-type access
+ port default vlan 2112
+#
+interface GigabitEthernet0/0/2
+ port link-type access
+ port default vlan 2111
+#
+#
+interface GigabitEthernet0/0/24
+ port link-type access
+ port default vlan 100
+#
+
+#
+ip route-static 0.0.0.0 0.0.0.0 10.12.172.1
+#
